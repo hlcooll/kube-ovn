@@ -52,7 +52,7 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=kubeovn, Version=v1
+	// Group=kubeovn.io, Version=v1
 	case v1.SchemeGroupVersion.WithResource("ips"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Kubeovn().V1().IPs().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("subnets"):

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	kubeovninformer "github.com/alauda/kube-ovn/pkg/client/informers/externalversions"
+	kubeovnlister "github.com/alauda/kube-ovn/pkg/client/listers/kube-ovn/v1"
 	"github.com/alauda/kube-ovn/pkg/ovs"
 	corev1 "k8s.io/api/core/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -44,6 +46,12 @@ type Controller struct {
 	deletePodQueue    workqueue.RateLimitingInterface
 	updatePodQueue    workqueue.RateLimitingInterface
 
+	subnetsLister     kubeovnlister.SubnetLister
+	subnetSynced      cache.InformerSynced
+	addSubnetQueue    workqueue.RateLimitingInterface
+	deleteSubnetQueue workqueue.RateLimitingInterface
+	updateSubnetQueue workqueue.RateLimitingInterface
+
 	namespacesLister     v1.NamespaceLister
 	namespacesSynced     cache.InformerSynced
 	addNamespaceQueue    workqueue.RateLimitingInterface
@@ -73,7 +81,8 @@ type Controller struct {
 	// Kubernetes API.
 	recorder record.EventRecorder
 
-	informerFactory informers.SharedInformerFactory
+	informerFactory        informers.SharedInformerFactory
+	kubeovnInformerFactory kubeovninformer.SharedInformerFactory
 
 	elector *leaderelection.LeaderElector
 }
@@ -91,7 +100,9 @@ func NewController(config *Configuration) *Controller {
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
 
 	informerFactory := kubeinformers.NewSharedInformerFactory(config.KubeClient, time.Second*30)
+	kubeovnInformerFactory := kubeovninformer.NewSharedInformerFactoryWithOptions(config.KubeOvnClient, time.Second*30)
 
+	subnetInformer := kubeovnInformerFactory.Kubeovn().V1().Subnets()
 	podInformer := informerFactory.Core().V1().Pods()
 	namespaceInformer := informerFactory.Core().V1().Namespaces()
 	nodeInformer := informerFactory.Core().V1().Nodes()
@@ -103,6 +114,12 @@ func NewController(config *Configuration) *Controller {
 		config:        config,
 		ovnClient:     ovs.NewClient(config.OvnNbHost, config.OvnNbPort, "", 0, config.ClusterRouter, config.ClusterTcpLoadBalancer, config.ClusterUdpLoadBalancer, config.NodeSwitch, config.NodeSwitchCIDR),
 		kubeclientset: config.KubeClient,
+
+		subnetsLister:     subnetInformer.Lister(),
+		subnetSynced:      subnetInformer.Informer().HasSynced,
+		addSubnetQueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "AddSubnet"),
+		deleteSubnetQueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "DeleteSubnet"),
+		updateSubnetQueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "UpdateSubnet"),
 
 		podsLister:        podInformer.Lister(),
 		podsSynced:        podInformer.Informer().HasSynced,
@@ -139,7 +156,8 @@ func NewController(config *Configuration) *Controller {
 
 		recorder: recorder,
 
-		informerFactory: informerFactory,
+		informerFactory:        informerFactory,
+		kubeovnInformerFactory: kubeovnInformerFactory,
 	}
 
 	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -173,6 +191,12 @@ func NewController(config *Configuration) *Controller {
 		AddFunc:    controller.enqueueAddNp,
 		UpdateFunc: controller.enqueueUpdateNp,
 		DeleteFunc: controller.enqueueDeleteNp,
+	})
+
+	subnetInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    controller.enqueueAddSubnet,
+		UpdateFunc: controller.enqueueUpdateSubnet,
+		DeleteFunc: controller.enqueueDeleteSubnet,
 	})
 
 	return controller
@@ -224,10 +248,11 @@ func (c *Controller) Run(stopCh <-chan struct{}) error {
 		time.Sleep(1 * time.Second)
 	}
 	c.informerFactory.Start(stopCh)
+	c.kubeovnInformerFactory.Start(stopCh)
 
 	// Wait for the caches to be synced before starting workers
 	klog.Info("Waiting for informer caches to sync")
-	if ok := cache.WaitForCacheSync(stopCh, c.podsSynced, c.namespacesSynced, c.nodesSynced, c.serviceSynced, c.endpointsSynced, c.npsSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopCh, c.subnetSynced, c.podsSynced, c.namespacesSynced, c.nodesSynced, c.serviceSynced, c.endpointsSynced, c.npsSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 

@@ -1,4 +1,4 @@
 // +k8s:deepcopy-gen=package
-// +groupName=kube-ovn.io
+// +groupName=kubeovn.io
 
 package v1
